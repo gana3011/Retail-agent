@@ -36,8 +36,6 @@ class AnswerGenerator:
 
         return f"""You are a helpful retail domain assistant. Answer the user's question using ONLY the provided context chunks. If the context does not contain enough information, say "I don't have enough information to answer that."
 
-For every piece of information you use, cite the source document name and scenario/term name if available.
-
 Context chunks:
 {context}
 
