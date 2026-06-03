@@ -1,32 +1,24 @@
+import logging
 import os
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-
-import json
-import ssl
 import time
-from pathlib import Path
 
-import httpx
 import streamlit as st
 
-# SSL patch for HuggingFace downloads
-os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
-ssl._create_default_https_context = ssl._create_unverified_context
-_original_init = httpx.Client.__init__
+from pipeline.ssl_setup import configure_ssl
 
-def _ssl_patched_init(self, *args, **kwargs):
-    kwargs["verify"] = False
-    _original_init(self, *args, **kwargs)
-httpx.Client.__init__ = _ssl_patched_init
+configure_ssl()
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
 from pipeline.chunking import chunk_all
 from pipeline.indexing import (
     load_chunks, get_embedder, get_qdrant_client,
     recreate_collection, embed_and_index,
 )
-from pipeline.retriever import SelfQueryRetriever
+from pipeline.retriever import Retriever
 from pipeline.generator import AnswerGenerator
-from pipeline.config import GROQ_API_KEY
+from pipeline.config import GROQ_API_KEY, QDRANT_COLLECTION, QDRANT_PATH
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Retail Knowledge Bot",
@@ -34,15 +26,20 @@ st.set_page_config(
     layout="wide",
 )
 
-for key in ["retriever", "generator", "indexed", "messages", "api_key_set"]:
-    if key not in st.session_state:
-        st.session_state[key] = None if key not in ("indexed", "api_key_set") else False
-if st.session_state.messages is None:
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+if "generator" not in st.session_state:
+    st.session_state.generator = None
+if "indexed" not in st.session_state:
+    st.session_state.indexed = False
+if "api_key_set" not in st.session_state:
+    st.session_state.api_key_set = False
+if "messages" not in st.session_state:
     st.session_state.messages = []
+
 
 @st.cache_resource
 def get_qdrant():
-    from pipeline.config import QDRANT_PATH
     _lock_file = QDRANT_PATH / ".lock"
     if _lock_file.exists():
         try:
@@ -51,12 +48,13 @@ def get_qdrant():
             pass
     return get_qdrant_client()
 
+
 @st.cache_resource
 def get_embeddings_model():
     return get_embedder()
 
+
 def try_load_index():
-    from pipeline.config import QDRANT_PATH, QDRANT_COLLECTION
     if not (QDRANT_PATH / "collection" / QDRANT_COLLECTION).exists():
         st.info("No existing index found. Click 'Build Index' to create one.")
         return False
@@ -66,7 +64,7 @@ def try_load_index():
         if count.count == 0:
             return False
         model = get_embeddings_model()
-        retriever = SelfQueryRetriever(client=client, embedder=model)
+        retriever = Retriever(client=client, embedder=model)
         st.session_state.retriever = retriever
         st.session_state.indexed = True
         api_key = os.environ.get("GROQ_API_KEY", "")
@@ -77,6 +75,7 @@ def try_load_index():
     except Exception as e:
         st.error(f"Failed to load index: {e}")
         return False
+
 
 if not st.session_state.indexed:
     try_load_index()
@@ -96,11 +95,11 @@ with st.sidebar:
             recreate_collection(client)
             embed_and_index(chunks, model, client)
         st.session_state.indexed = True
-        retriever = SelfQueryRetriever(client=client, embedder=model)
+        retriever = Retriever(client=client, embedder=model)
         st.session_state.retriever = retriever
         generator = AnswerGenerator(api_key=os.environ.get("GROQ_API_KEY", ""))
         st.session_state.generator = generator
-        count = client.count("retail_chunks")
+        count = client.count(QDRANT_COLLECTION)
         st.success(f"Indexed {count.count} chunks ready!")
 
     st.metric("Index", "Ready" if st.session_state.indexed else "Not built")
@@ -136,7 +135,25 @@ for msg in st.session_state.messages:
                         label += " - " + " | ".join(parts)
                     st.markdown(f"- {label} (score: {s['relevance_score']})")
 
-def answer_question(prompt):
+
+def render_sources(sources: list[dict]):
+    if sources:
+        with st.expander("Sources"):
+            for s in sources:
+                parts = []
+                if s.get("title"):
+                    parts.append(f"Scenario: {s['title']}")
+                if s.get("term"):
+                    parts.append(f"Term: {s['term']}")
+                if s.get("domain"):
+                    parts.append(f"Domain: {s['domain']}")
+                label = f"**{s['source_doc']}**"
+                if parts:
+                    label += " - " + " | ".join(parts)
+                st.markdown(f"- {label} (score: {s['relevance_score']})")
+
+
+def answer_question(prompt: str):
     if not st.session_state.api_key_set:
         with st.chat_message("assistant"):
             st.error("Please set your Groq API key in the .env file first.")
@@ -150,39 +167,38 @@ def answer_question(prompt):
         return
 
     with st.chat_message("assistant"):
-        with st.spinner("Retrieving and generating..."):
+        placeholder = st.empty()
+        with st.spinner("Retrieving..."):
             t0 = time.time()
             try:
                 chunks = st.session_state.retriever.retrieve(prompt)
-                answer, sources = st.session_state.generator.generate_with_sources(prompt, chunks)
+                elapsed_retrieval = time.time() - t0
+
+                full_response = ""
+                stream = st.session_state.generator.generate_stream(prompt, chunks)
+                for token in stream:
+                    full_response += token
+                    placeholder.markdown(full_response + "▌")
+
+                placeholder.markdown(full_response)
                 elapsed = time.time() - t0
-                st.markdown(answer)
-                st.caption(f"Retrieved in {elapsed:.1f}s from {len(chunks)} chunks")
-                if sources:
-                    with st.expander("Sources"):
-                        for s in sources:
-                            parts = []
-                            if s.get("title"):
-                                parts.append(f"Scenario: {s['title']}")
-                            if s.get("term"):
-                                parts.append(f"Term: {s['term']}")
-                            if s.get("domain"):
-                                parts.append(f"Domain: {s['domain']}")
-                            label = f"**{s['source_doc']}**"
-                            if parts:
-                                label += " - " + " | ".join(parts)
-                            st.markdown(f"- {label} (score: {s['relevance_score']})")
+                st.caption(f"Retrieved {len(chunks)} chunks in {elapsed_retrieval:.1f}s, generated in {elapsed - elapsed_retrieval:.1f}s")
+
+                sources = st.session_state.generator._extract_sources(chunks)
+                render_sources(sources)
+
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": answer,
+                    "content": full_response,
                     "sources": sources,
                 })
             except Exception as e:
-                st.error(f"Error: {e}")
+                placeholder.error(f"Error: {e}")
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": f"Error: {e}",
                 })
+
 
 if st.session_state.get("pending_question"):
     prompt = st.session_state.pop("pending_question")

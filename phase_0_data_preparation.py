@@ -45,7 +45,10 @@ def clean_text(text: str) -> str:
 def get_doc_metadata(filepath: str):
     path = Path(filepath)
     fname = path.name
-    mtime = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+    except OSError:
+        mtime = datetime.now().isoformat()
 
     doc_type_map = {
         "cheatsheet": "cheatsheet",
@@ -226,17 +229,18 @@ def extract_scenarios(paragraphs):
 
 
 def extract_terminology_from_text(text: str):
-    match = re.match(r'Term(?:inology)?\s*(?:-|–|:)?\s*(.+?)\s*[:\-–]\s*(.*)', text, re.DOTALL)
-    if match:
-        return {
-            "term": clean_text(match.group(1)),
-            "definition": clean_text(match.group(2)),
-        }
+    # Try the more specific "Terminology Explained:" pattern first
     match2 = re.match(r'Term(?:inology)?\s+(Explained)?:?\s*(.+?)\s*[:\-–]\s*(.*)', text, re.DOTALL)
     if match2:
         return {
             "term": clean_text(match2.group(2)),
             "definition": clean_text(match2.group(3)),
+        }
+    match = re.match(r'Term(?:inology)?\s*(?:-|–|:)?\s*(.+?)\s*[:\-–]\s*(.*)', text, re.DOTALL)
+    if match:
+        return {
+            "term": clean_text(match.group(1)),
+            "definition": clean_text(match.group(2)),
         }
     return None
 
@@ -463,8 +467,11 @@ def export_jsonl(elements: list[dict], output_path: str):
 # ─────────────────────────────────────────────
 
 def main():
-    data_dir = Path(r"C:\Users\GanapathiSubramanian\Retail_agent\data")
-    output_dir = Path(r"C:\Users\GanapathiSubramanian\Retail_agent\output\phase_0")
+    from pipeline.config import DATA_DIR, PHASE_0_DIR
+
+    data_dir = DATA_DIR
+    output_dir = PHASE_0_DIR
+    merged_path = output_dir / "retail_knowledge_base.json"
     summary_path = output_dir / "summary.json"
 
     docx_files = sorted(data_dir.glob("*.docx"))
@@ -472,7 +479,7 @@ def main():
         print("No .docx files found in data directory.")
         return
 
-    total_elements = 0
+    all_elements = []
     file_counts = {}
 
     for fpath in docx_files:
@@ -481,14 +488,23 @@ def main():
         base_name = fpath.stem.replace(" ", "_").lower()
         out_path = output_dir / f"{base_name}.jsonl"
         export_jsonl(elements, str(out_path))
+        all_elements.extend(elements)
         count = len(elements)
         file_counts[fpath.name] = count
-        total_elements += count
         print(f"  -> {count} elements written to {out_path.name}")
+
+    merged = {
+        "version": "1.0",
+        "generated_at": datetime.now().isoformat(),
+        "total_elements": len(all_elements),
+        "elements": all_elements,
+    }
+    with open(merged_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
 
     summary = {
         "total_files": len(docx_files),
-        "total_elements": total_elements,
+        "total_elements": len(all_elements),
         "files": file_counts,
         "generated_at": datetime.now().isoformat(),
     }
@@ -498,8 +514,8 @@ def main():
     print(f"\n{'='*60}")
     print(f"Phase 0 Complete:")
     print(f"  Files processed: {len(docx_files)}")
-    print(f"  Total elements: {total_elements}")
-    print(f"  Output directory: {output_dir}")
+    print(f"  Total elements: {len(all_elements)}")
+    print(f"  Merged: {merged_path}")
     print(f"  Summary: {summary_path}")
 
 

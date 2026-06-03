@@ -1,37 +1,32 @@
 import json
-import os
-import ssl
+import logging
 import time
 from pathlib import Path
 from typing import Optional
 
-import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams
 from sentence_transformers import SentenceTransformer
 
-# Disable SSL verification for HuggingFace downloads
-os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
-ssl._create_default_https_context = ssl._create_unverified_context
-_original_init = httpx.Client.__init__
-def _ssl_patched_init(self, *args, **kwargs):
-    kwargs["verify"] = False
-    _original_init(self, *args, **kwargs)
-httpx.Client.__init__ = _ssl_patched_init
+from .ssl_setup import configure_ssl
+
+configure_ssl()
 
 from .config import (
     PHASE_1_DIR, QDRANT_PATH, QDRANT_COLLECTION,
     EMBEDDING_MODEL, EMBEDDING_DIM,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def get_embedder(model_name: Optional[str] = None):
     name = model_name or EMBEDDING_MODEL
-    print(f"Loading embedding model: {name} ...")
+    logger.info("Loading embedding model: %s ...", name)
     t0 = time.time()
     model = SentenceTransformer(name, trust_remote_code=True)
-    print(f"Model loaded in {time.time() - t0:.1f}s")
+    logger.info("Model loaded in %.1fs", time.time() - t0)
     return model
 
 
@@ -56,8 +51,8 @@ def get_qdrant_client() -> QdrantClient:
 def recreate_collection(client: QdrantClient):
     try:
         client.delete_collection(QDRANT_COLLECTION)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Could not delete existing collection: %s", e)
 
     client.create_collection(
         collection_name=QDRANT_COLLECTION,
@@ -67,28 +62,14 @@ def recreate_collection(client: QdrantClient):
         ),
     )
 
-    client.create_payload_index(
-        collection_name=QDRANT_COLLECTION,
-        field_name="doc_type",
-        field_schema=models.PayloadSchemaType.KEYWORD,
-    )
-    client.create_payload_index(
-        collection_name=QDRANT_COLLECTION,
-        field_name="element_type",
-        field_schema=models.PayloadSchemaType.KEYWORD,
-    )
-    client.create_payload_index(
-        collection_name=QDRANT_COLLECTION,
-        field_name="domain",
-        field_schema=models.PayloadSchemaType.KEYWORD,
-    )
-    client.create_payload_index(
-        collection_name=QDRANT_COLLECTION,
-        field_name="source_doc",
-        field_schema=models.PayloadSchemaType.KEYWORD,
-    )
+    for field in ("doc_type", "element_type", "domain", "source_doc"):
+        client.create_payload_index(
+            collection_name=QDRANT_COLLECTION,
+            field_name=field,
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
 
-    print(f"Collection '{QDRANT_COLLECTION}' created with indexes")
+    logger.info("Collection '%s' created with indexes", QDRANT_COLLECTION)
 
 
 def embed_and_index(
@@ -100,7 +81,7 @@ def embed_and_index(
     texts = [c["text"] for c in chunks]
     metadatas = [c["metadata"] for c in chunks]
 
-    print(f"Generating embeddings for {len(texts)} chunks...")
+    logger.info("Generating embeddings for %d chunks...", len(texts))
     t0 = time.time()
 
     for i in range(0, len(texts), batch_size):
@@ -128,27 +109,28 @@ def embed_and_index(
         )
 
         if (i // batch_size) % 5 == 0:
-            print(f"  Indexed {min(i + batch_size, len(texts))}/{len(texts)} chunks")
+            logger.info("  Indexed %d/%d chunks", min(i + batch_size, len(texts)), len(texts))
 
     elapsed = time.time() - t0
-    print(f"Indexing complete: {len(texts)} chunks in {elapsed:.1f}s")
+    logger.info("Indexing complete: %d chunks in %.1fs", len(texts), elapsed)
 
 
-def run_indexing():
-    print("=" * 60)
-    print("Phase 2: Embedding & Indexing")
-    print("=" * 60)
+def run_indexing(force: bool = True):
+    logger.info("=" * 60)
+    logger.info("Phase 2: Embedding & Indexing")
+    logger.info("=" * 60)
 
     chunks = load_chunks()
-    print(f"Loaded {len(chunks)} chunks from phase 1")
+    logger.info("Loaded %d chunks from phase 1", len(chunks))
 
     model = get_embedder()
     client = get_qdrant_client()
-    recreate_collection(client)
+    if force:
+        recreate_collection(client)
     embed_and_index(chunks, model, client)
 
     count = client.count(QDRANT_COLLECTION)
-    print(f"Collection '{QDRANT_COLLECTION}' has {count.count} vectors")
+    logger.info("Collection '%s' has %d vectors", QDRANT_COLLECTION, count.count)
     return client
 
 

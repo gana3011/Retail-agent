@@ -35,6 +35,31 @@ TEST_QUESTIONS = [
     "What is the role of POS system in retail?",
 ]
 
+# Optional: mapping of questions to expected key terms for automated evaluation
+EXPECTED_KEYWORDS: dict[str, list[str]] = {
+    "What is a SKU and why is it important?": ["stock keeping unit", "product", "inventory"],
+    "What does UPC stand for?": ["universal product code"],
+    "What is the difference between ATP and safety stock?": ["available to promise", "safety stock"],
+    "What is a planogram?": ["planogram", "shelf", "display"],
+    "What is omnichannel retail?": ["omnichannel", "channel", "seamless"],
+    "What is the order lifecycle in retail?": ["order", "lifecycle", "fulfillment"],
+    "What is reverse logistics?": ["reverse", "logistics", "return"],
+    "How is inventory turnover calculated?": ["inventory", "turnover", "ratio", "cogs"],
+    "What is the role of POS system in retail?": ["pos", "point of sale", "transaction"],
+}
 
-def get_test_set():
+
+def get_test_set() -> list[str]:
     return TEST_QUESTIONS
+
+
+def evaluate_answer(question: str, answer: str) -> dict:
+    keywords = EXPECTED_KEYWORDS.get(question, [])
+    answer_lower = answer.lower()
+    matched = [kw for kw in keywords if kw in answer_lower]
+    return {
+        "question": question,
+        "keyword_hits": matched,
+        "keyword_misses": [kw for kw in keywords if kw not in answer_lower],
+        "precision": len(matched) / len(keywords) if keywords else None,
+    }

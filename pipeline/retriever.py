@@ -1,54 +1,40 @@
 import json
-import os
-import ssl
+import logging
 from typing import Optional
 
-import httpx
 from groq import Groq
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
 
-os.environ["HF_HUB_DISABLE_SSL_VERIFICATION"] = "1"
-ssl._create_default_https_context = ssl._create_unverified_context
-_original_init = httpx.Client.__init__
-def _ssl_patched_init(self, *args, **kwargs):
-    kwargs["verify"] = False
-    _original_init(self, *args, **kwargs)
-httpx.Client.__init__ = _ssl_patched_init
+from .ssl_setup import configure_ssl
+
+configure_ssl()
 
 from .config import (
     QDRANT_PATH, QDRANT_COLLECTION, EMBEDDING_MODEL,
-    GROQ_API_KEY, GROQ_MODEL, TOP_K,
+    GROQ_API_KEY, GROQ_MODEL, TOP_K, RERANK_TOP_K, RERANKER_MODEL,
 )
 
+logger = logging.getLogger(__name__)
 
-VALID_DOC_TYPES = {"scenarios", "cheatsheet", "faq", "process_flow", "training"}
+QUERY_EXPANSION_PROMPT = """You are a retail knowledge base assistant. Given a user question, generate 2 alternative phrasings that would help retrieve relevant information from different document types (process flows, FAQs, glossary terms, training content, scenarios).
 
-FILTER_PROMPT = """You are a retail knowledge base classifier. Given a user question, determine which document type it is most likely asking about.
+Return a JSON array of 2-3 query strings. Each should capture a different aspect or angle of the question.
+Keep each query concise (under 20 words).
 
-Valid document types:
-- "scenarios" — Real-world problem scenarios (e.g., "What happens when...", "How to handle...", troubleshooting)
-- "cheatsheet" — Glossary terms and definitions (e.g., "What is...", "Define...", "Explain a term")
-- "faq" — Frequently asked questions about retail concepts
-- "process_flow" — Step-by-step processes (e.g., "How does... work", "Steps in...", "Walk me through...")
-- "training" — General retail training content
-
-If the question is general or doesn't clearly target one type, return null for filter_doc_type.
-
-Respond with valid JSON only:
-{{"filter_doc_type": "<doc_type or null>", "reasoning": "<brief explanation>"}}
-
-Question: {question}"""
+Question: {question}
+JSON:"""
 
 
-class SelfQueryRetriever:
+class Retriever:
     def __init__(
         self,
         client: Optional[QdrantClient] = None,
         embedder: Optional[SentenceTransformer] = None,
         groq_client: Optional[Groq] = None,
         model: Optional[str] = None,
+        reranker: Optional[object] = None,
     ):
         self.client = client or QdrantClient(path=str(QDRANT_PATH))
         self.embedder = embedder or SentenceTransformer(
@@ -56,35 +42,45 @@ class SelfQueryRetriever:
         )
         self.llm_client = groq_client or (Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None)
         self.llm_model = model or GROQ_MODEL
+        self.reranker = reranker
 
-    def extract_filters(self, question: str) -> dict:
+    def _load_reranker(self):
+        if self.reranker is not None:
+            return self.reranker
+        try:
+            from sentence_transformers import CrossEncoder
+            self.reranker = CrossEncoder(RERANKER_MODEL)
+            logger.info("Reranker model '%s' loaded", RERANKER_MODEL)
+        except Exception as e:
+            logger.warning("Failed to load reranker '%s': %s. Skipping reranking.", RERANKER_MODEL, e)
+            self.reranker = False
+        return self.reranker
+
+    def expand_queries(self, question: str) -> list[str]:
         if not self.llm_client:
-            return {}
+            return [question]
         try:
             response = self.llm_client.chat.completions.create(
                 model=self.llm_model,
-                messages=[{"role": "user", "content": FILTER_PROMPT.format(question=question)}],
-                temperature=0,
-                max_tokens=150,
+                messages=[{"role": "user", "content": QUERY_EXPANSION_PROMPT.format(question=question)}],
+                temperature=0.3,
+                max_tokens=200,
             )
             raw = response.choices[0].message.content.strip()
-            result = json.loads(raw)
-            doc_type = result.get("filter_doc_type")
-            reasoning = result.get("reasoning", "")
-            if doc_type and doc_type in VALID_DOC_TYPES:
-                print(f"[Filter] Question: {question} -> doc_type={doc_type} ({reasoning})")
-                return {"doc_type": doc_type}
-            else:
-                print(f"[Filter] Question: {question} -> no filter ({reasoning})")
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            expansions = json.loads(raw)
+            if isinstance(expansions, list) and len(expansions) > 0:
+                all_queries = [question] + [q for q in expansions if q.strip()]
+                logger.info("[MultiQuery] %d queries for: %s", len(all_queries), question)
+                return all_queries[:4]
         except Exception as e:
-            print(f"[Filter] Error classifying question '{question}': {e}")
-        return {}
+            logger.warning("[MultiQuery] Expansion failed for '%s': %s", question, e)
+        return [question]
 
-    def _search(self, query_vector: list, query_filter, k: int) -> list[dict]:
+    def _search(self, query_vector: list, k: int) -> list[dict]:
         result = self.client.query_points(
             collection_name=QDRANT_COLLECTION,
             query=query_vector,
-            query_filter=query_filter,
             limit=k,
             with_payload=True,
         )
@@ -92,38 +88,52 @@ class SelfQueryRetriever:
         for point in result.points:
             results.append({
                 "text": point.payload.get("text", ""),
-                "score": point.score,
+                "score": point.score or 0.0,
                 "metadata": {
                     k: v for k, v in point.payload.items() if k != "text"
                 },
             })
         return results
 
+    def _search_all(self, queries: list[str], k: int) -> list[dict]:
+        seen_texts = set()
+        all_results = []
+        for q in queries:
+            vec = self.embedder.encode(q).tolist()
+            results = self._search(vec, k)
+            for r in results:
+                text = r["text"][:200]
+                if text not in seen_texts:
+                    seen_texts.add(text)
+                    all_results.append(r)
+        logger.info("[Search] %d queries -> %d unique candidates", len(queries), len(all_results))
+        return all_results
+
+    def _rerank(self, question: str, chunks: list[dict], top_k: int = RERANK_TOP_K) -> list[dict]:
+        reranker = self._load_reranker()
+        if not reranker:
+            return chunks[:top_k]
+
+        pairs = [(question, c["text"]) for c in chunks]
+        scores = reranker.predict(pairs)
+        for c, s in zip(chunks, scores):
+            c["rerank_score"] = float(s)
+
+        chunks.sort(key=lambda c: c.get("rerank_score", 0.0), reverse=True)
+        logger.info("[Rerank] top-1 score=%.4f, bottom-1 score=%.4f",
+                    chunks[0]["rerank_score"], chunks[-1]["rerank_score"])
+        return chunks[:top_k]
+
     def retrieve(self, question: str, k: int = TOP_K) -> list[dict]:
-        filters = self.extract_filters(question)
-        query_embedding = self.embedder.encode(question).tolist()
-
-        filter_conditions = []
-        for key, value in filters.items():
-            filter_conditions.append(
-                models.FieldCondition(
-                    key=key,
-                    match=models.MatchValue(value=value),
-                )
-            )
-
-        query_filter = None
-        if filter_conditions:
-            query_filter = models.Filter(
-                must=filter_conditions,
-            )
-
-        return self._search(query_embedding, query_filter, k)
+        queries = self.expand_queries(question)
+        candidates = self._search_all(queries, k * 2)
+        return self._rerank(question, candidates, k)
 
     def retrieve_with_filters(
         self, question: str, override_filters: dict, k: int = TOP_K
     ) -> list[dict]:
-        query_embedding = self.embedder.encode(question).tolist()
+        queries = self.expand_queries(question)
+        query_vectors = [self.embedder.encode(q).tolist() for q in queries]
 
         filter_conditions = []
         for key, value in override_filters.items():
@@ -139,4 +149,26 @@ class SelfQueryRetriever:
         if filter_conditions:
             query_filter = models.Filter(must=filter_conditions)
 
-        return self._search(query_embedding, query_filter, k)
+        seen_texts = set()
+        all_results = []
+        for vec in query_vectors:
+            result = self.client.query_points(
+                collection_name=QDRANT_COLLECTION,
+                query=vec,
+                query_filter=query_filter,
+                limit=k * 2,
+                with_payload=True,
+            )
+            for point in result.points:
+                text = (point.payload.get("text", "") or "")[:200]
+                if text not in seen_texts:
+                    seen_texts.add(text)
+                    all_results.append({
+                        "text": point.payload.get("text", ""),
+                        "score": point.score or 0.0,
+                        "metadata": {
+                            k: v for k, v in point.payload.items() if k != "text"
+                        },
+                    })
+
+        return self._rerank(question, all_results, k)
