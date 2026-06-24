@@ -26,6 +26,21 @@ Keep each query concise (under 20 words).
 Question: {question}
 JSON:"""
 
+CONTEXTUAL_REWRITE_PROMPT = """You are a retail knowledge base assistant. The user is asking a follow-up question in a conversation. Rewrite their latest question as a fully self-contained, standalone question that can be understood without the conversation history.
+
+Rules:
+- Resolve all pronouns (it, they, that, this, those, etc.) to the specific nouns they refer to.
+- Preserve the user's intent exactly.
+- If the question is already self-contained, return it unchanged.
+- Return ONLY the rewritten question, nothing else.
+
+Conversation history:
+{history}
+
+Latest question: {question}
+
+Rewritten standalone question:"""
+
 
 class Retriever:
     def __init__(
@@ -56,13 +71,69 @@ class Retriever:
             self.reranker = False
         return self.reranker
 
-    def expand_queries(self, question: str) -> list[str]:
-        if not self.llm_client:
-            return [question]
+    def rewrite_with_context(
+        self, question: str, chat_history: list[dict]
+    ) -> str:
+        """Rewrite a follow-up question into a standalone query using chat history.
+
+        If no chat history is present or the LLM client is unavailable,
+        returns the question unchanged.
+        """
+        if not chat_history or not self.llm_client:
+            return question
+
+        # Build a compact history string (keep last 6 turns = 3 exchanges max)
+        recent = chat_history[-6:]
+        history_lines = []
+        for msg in recent:
+            role = msg.get("role", "user").capitalize()
+            content = msg.get("content", "")
+            # Truncate long assistant answers to keep the prompt short
+            if role == "Assistant" and len(content) > 300:
+                content = content[:300] + "..."
+            history_lines.append(f"{role}: {content}")
+        history_str = "\n".join(history_lines)
+
         try:
             response = self.llm_client.chat.completions.create(
                 model=self.llm_model,
-                messages=[{"role": "user", "content": QUERY_EXPANSION_PROMPT.format(question=question)}],
+                messages=[{
+                    "role": "user",
+                    "content": CONTEXTUAL_REWRITE_PROMPT.format(
+                        history=history_str, question=question
+                    ),
+                }],
+                temperature=0.0,
+                max_tokens=150,
+            )
+            rewritten = response.choices[0].message.content.strip()
+            if rewritten:
+                logger.info(
+                    "[ContextRewrite] '%s' → '%s'", question[:60], rewritten[:60]
+                )
+                return rewritten
+        except Exception as e:
+            logger.warning("[ContextRewrite] Failed for '%s': %s", question, e)
+
+        return question
+
+    def expand_queries(
+        self, question: str, chat_history: list[dict] | None = None
+    ) -> list[str]:
+        """Expand a question into multiple retrieval queries.
+
+        When *chat_history* is provided the question is first rewritten
+        into a standalone form so that pronoun references are resolved.
+        """
+        # Step 1 — contextual rewrite (no-op when history is empty)
+        standalone = self.rewrite_with_context(question, chat_history or [])
+
+        if not self.llm_client:
+            return [standalone]
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "user", "content": QUERY_EXPANSION_PROMPT.format(question=standalone)}],
                 temperature=0.3,
                 max_tokens=200,
             )
@@ -70,12 +141,12 @@ class Retriever:
             raw = raw.replace("```json", "").replace("```", "").strip()
             expansions = json.loads(raw)
             if isinstance(expansions, list) and len(expansions) > 0:
-                all_queries = [question] + [q for q in expansions if q.strip()]
-                logger.info("[MultiQuery] %d queries for: %s", len(all_queries), question)
+                all_queries = [standalone] + [q for q in expansions if q.strip()]
+                logger.info("[MultiQuery] %d queries for: %s", len(all_queries), standalone)
                 return all_queries[:4]
         except Exception as e:
-            logger.warning("[MultiQuery] Expansion failed for '%s': %s", question, e)
-        return [question]
+            logger.warning("[MultiQuery] Expansion failed for '%s': %s", standalone, e)
+        return [standalone]
 
     def _search(self, query_vector: list, k: int) -> list[dict]:
         result = self.client.query_points(

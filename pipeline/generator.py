@@ -14,7 +14,31 @@ class AnswerGenerator:
         self.model = model or GROQ_MODEL
         self.client = Groq(api_key=self.api_key) if self.api_key else None
 
-    def _build_prompt(self, question: str, chunks: list[dict]) -> str:
+    @staticmethod
+    def _format_chat_history(chat_history: list[dict], max_turns: int = 6) -> str:
+        """Format recent chat history into a string for the prompt.
+
+        Keeps the last *max_turns* messages (user + assistant combined)
+        and truncates long assistant answers to avoid blowing up context.
+        """
+        if not chat_history:
+            return ""
+        recent = chat_history[-max_turns:]
+        lines = []
+        for msg in recent:
+            role = msg.get("role", "user").capitalize()
+            content = msg.get("content", "")
+            if role == "Assistant" and len(content) > 500:
+                content = content[:500] + "..."
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    def _build_prompt(
+        self,
+        question: str,
+        chunks: list[dict],
+        chat_history: list[dict] | None = None,
+    ) -> str:
         context_parts = []
         for i, c in enumerate(chunks, 1):
             meta = c.get("metadata", {})
@@ -37,6 +61,14 @@ class AnswerGenerator:
 
         context = "\n---\n".join(context_parts)
 
+        # Build optional conversation history section
+        history_section = ""
+        if chat_history:
+            formatted = self._format_chat_history(chat_history)
+            if formatted:
+                history_section = f"""\n\nPrevious conversation (use this to understand follow-up questions and maintain context):
+{formatted}\n"""
+
         return f"""You are a helpful retail domain assistant. Answer the user's question thoroughly using the provided context chunks.
 
 GUIDELINES:
@@ -46,7 +78,9 @@ GUIDELINES:
 - If the context collectively contains the answer across multiple chunks, DO NOT say information is missing — combine the pieces.
 - Only say "I don't have enough information to answer that" if no chunk addresses the question at all.
 - Be detailed and specific. Include definitions, steps, actors, systems, and examples where available.
-
+- If the user asks a follow-up question, use the conversation history below to understand what they are referring to.
+- Keep your answers consistent with what you said previously in the conversation.
+{history_section}
 Context chunks:
 {context}
 
@@ -54,11 +88,16 @@ User Question: {question}
 
 Answer:"""
 
-    def generate(self, question: str, chunks: list[dict]) -> str:
+    def generate(
+        self,
+        question: str,
+        chunks: list[dict],
+        chat_history: list[dict] | None = None,
+    ) -> str:
         if not self.client:
             return "GROQ_API_KEY not set. Please set the environment variable and restart."
 
-        prompt = self._build_prompt(question, chunks)
+        prompt = self._build_prompt(question, chunks, chat_history)
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -70,13 +109,16 @@ Answer:"""
         return response.choices[0].message.content.strip()
 
     def generate_stream(
-        self, question: str, chunks: list[dict]
+        self,
+        question: str,
+        chunks: list[dict],
+        chat_history: list[dict] | None = None,
     ) -> Generator[str, None, None]:
         if not self.client:
             yield "GROQ_API_KEY not set. Please set the environment variable and restart."
             return
 
-        prompt = self._build_prompt(question, chunks)
+        prompt = self._build_prompt(question, chunks, chat_history)
 
         stream = self.client.chat.completions.create(
             model=self.model,

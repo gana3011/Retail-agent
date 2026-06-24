@@ -463,27 +463,32 @@ def export_jsonl(elements: list[dict], output_path: str):
 
 
 # ─────────────────────────────────────────────
-# CLI Entry Point
+# Reusable entry point (called by CLI and Streamlit)
 # ─────────────────────────────────────────────
 
-def main():
+def run_phase_0(data_dir=None, output_dir=None):
+    """Process all .docx files in *data_dir* into structured JSON.
+
+    Returns a summary dict with keys:
+        total_files, total_elements, files (per-file counts),
+        merged_path, summary_path.
+    Returns ``None`` when no .docx files are found.
+    """
     from pipeline.config import DATA_DIR, PHASE_0_DIR
 
-    data_dir = DATA_DIR
-    output_dir = PHASE_0_DIR
+    data_dir = Path(data_dir) if data_dir else DATA_DIR
+    output_dir = Path(output_dir) if output_dir else PHASE_0_DIR
     merged_path = output_dir / "retail_knowledge_base.json"
     summary_path = output_dir / "summary.json"
 
     docx_files = sorted(data_dir.glob("*.docx"))
     if not docx_files:
-        print("No .docx files found in data directory.")
-        return
+        return None
 
     all_elements = []
     file_counts = {}
 
     for fpath in docx_files:
-        print(f"Processing: {fpath.name} ...")
         elements = process_document(str(fpath))
         base_name = fpath.stem.replace(" ", "_").lower()
         out_path = output_dir / f"{base_name}.jsonl"
@@ -491,7 +496,6 @@ def main():
         all_elements.extend(elements)
         count = len(elements)
         file_counts[fpath.name] = count
-        print(f"  -> {count} elements written to {out_path.name}")
 
     merged = {
         "version": "1.0",
@@ -511,13 +515,35 @@ def main():
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
+    return {
+        "total_files": len(docx_files),
+        "total_elements": len(all_elements),
+        "files": file_counts,
+        "merged_path": str(merged_path),
+        "summary_path": str(summary_path),
+    }
+
+
+# ─────────────────────────────────────────────
+# CLI Entry Point
+# ─────────────────────────────────────────────
+
+def main():
+    result = run_phase_0()
+    if result is None:
+        print("No .docx files found in data directory.")
+        return
+
     print(f"\n{'='*60}")
     print(f"Phase 0 Complete:")
-    print(f"  Files processed: {len(docx_files)}")
-    print(f"  Total elements: {len(all_elements)}")
-    print(f"  Merged: {merged_path}")
-    print(f"  Summary: {summary_path}")
+    print(f"  Files processed: {result['total_files']}")
+    print(f"  Total elements: {result['total_elements']}")
+    print(f"  Merged: {result['merged_path']}")
+    print(f"  Summary: {result['summary_path']}")
+    for fname, count in result["files"].items():
+        print(f"    {fname}: {count} elements")
 
 
 if __name__ == "__main__":
     main()
+

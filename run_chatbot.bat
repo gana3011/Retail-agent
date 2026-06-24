@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-echo Starting Retail Knowledge Chatbot...
+echo Starting Retail Knowledge Chatbot (LangGraph edition)...
 echo.
 echo 1. If you have a Groq API key, set it:
 echo    set GROQ_API_KEY=gsk_your_key_here
