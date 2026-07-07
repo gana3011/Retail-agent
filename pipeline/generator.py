@@ -1,26 +1,31 @@
+"""Answer generator using a local Ollama model."""
+
 import logging
 from typing import Generator, Optional
 
-from groq import Groq
+import requests
 
-from .config import GROQ_API_KEY, GROQ_MODEL
+from .config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
 logger = logging.getLogger(__name__)
 
 
 class AnswerGenerator:
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key or GROQ_API_KEY
-        self.model = model or GROQ_MODEL
-        self.client = Groq(api_key=self.api_key) if self.api_key else None
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        # legacy param kept for API compatibility — ignored
+        api_key: Optional[str] = None,
+    ):
+        self.model = model or OLLAMA_MODEL
+        self.base_url = (base_url or OLLAMA_BASE_URL).rstrip("/")
+
+    # ── Helpers ────────────────────────────────────────────────
 
     @staticmethod
     def _format_chat_history(chat_history: list[dict], max_turns: int = 6) -> str:
-        """Format recent chat history into a string for the prompt.
-
-        Keeps the last *max_turns* messages (user + assistant combined)
-        and truncates long assistant answers to avoid blowing up context.
-        """
+        """Format recent chat history into a string for the prompt."""
         if not chat_history:
             return ""
         recent = chat_history[-max_turns:]
@@ -61,7 +66,6 @@ class AnswerGenerator:
 
         context = "\n---\n".join(context_parts)
 
-        # Build optional conversation history section
         history_section = ""
         if chat_history:
             formatted = self._format_chat_history(chat_history)
@@ -88,25 +92,32 @@ User Question: {question}
 
 Answer:"""
 
+    # ── Generation ─────────────────────────────────────────────
+
     def generate(
         self,
         question: str,
         chunks: list[dict],
         chat_history: list[dict] | None = None,
     ) -> str:
-        if not self.client:
-            return "GROQ_API_KEY not set. Please set the environment variable and restart."
-
         prompt = self._build_prompt(question, chunks, chat_history)
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=2048,
-        )
-
-        return response.choices[0].message.content.strip()
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.2},
+        }
+        try:
+            resp = requests.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=180,
+            )
+            resp.raise_for_status()
+            return resp.json()["message"]["content"].strip()
+        except Exception as e:
+            logger.error("Ollama generation failed: %s", e)
+            return f"Error generating answer: {e}"
 
     def generate_stream(
         self,
@@ -114,26 +125,38 @@ Answer:"""
         chunks: list[dict],
         chat_history: list[dict] | None = None,
     ) -> Generator[str, None, None]:
-        if not self.client:
-            yield "GROQ_API_KEY not set. Please set the environment variable and restart."
-            return
-
         prompt = self._build_prompt(question, chunks, chat_history)
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+            "options": {"temperature": 0.2},
+        }
+        try:
+            with requests.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                stream=True,
+                timeout=180,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    import json as _json
+                    data = _json.loads(line)
+                    token = data.get("message", {}).get("content", "")
+                    if token:
+                        yield token
+                    if data.get("done"):
+                        break
+        except Exception as e:
+            logger.error("Ollama streaming failed: %s", e)
+            yield f"Error: {e}"
 
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=2048,
-            stream=True,
-        )
-
-        for chunk in stream:
-            content = chunk.choices[0].delta.content or ""
-            if content:
-                yield content
-
-    def generate_with_sources(self, question: str, chunks: list[dict]) -> tuple[str, list[dict]]:
+    def generate_with_sources(
+        self, question: str, chunks: list[dict]
+    ) -> tuple[str, list[dict]]:
         answer = self.generate(question, chunks)
         sources = self._extract_sources(chunks)
         return answer, sources

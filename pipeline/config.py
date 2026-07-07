@@ -20,15 +20,26 @@ PHASE_0_JSON = PHASE_0_DIR / "retail_knowledge_base.json"
 PHASE_1_DIR = OUTPUT_DIR / "phase_1"
 QDRANT_PATH = OUTPUT_DIR / "qdrant_storage"
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
+# ── Embedding: Ollama nomic-embed-text (768-dim, fully local) ─────────────────
+EMBEDDING_MODEL = "nomic-embed-text"   # ollama pull nomic-embed-text
+EMBEDDING_DIM = 768
+
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
-RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# ── Ollama LLM (fully local, no API key needed) ───────────────────────────────
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")  # or qwen2.5:7b
+
+# ── Speed controls ────────────────────────────────────────────────────────────
+# Query expansion: adds ~10-15s per query (extra LLM call). Disable for speed.
+ENABLE_QUERY_EXPANSION = os.environ.get("ENABLE_QUERY_EXPANSION", "false").lower() == "true"
+# LLM reranking: adds ~40-50s per query (extra LLM call). Disable for speed.
+# When False, chunks are ordered by Qdrant vector similarity score (still good quality).
+ENABLE_LLM_RERANK = os.environ.get("ENABLE_LLM_RERANK", "false").lower() == "true"
+
+# Reranking is done via Ollama LLM prompt (no HuggingFace CrossEncoder needed)
 
 QDRANT_COLLECTION = "retail_chunks"
-TOP_K = 8
-RERANK_TOP_K = 6
+TOP_K = 6           # reduced from 8 for faster generation prompts
+RERANK_TOP_K = 5

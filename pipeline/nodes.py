@@ -20,7 +20,7 @@ from .indexing import (
 from .retriever import Retriever
 from .generator import AnswerGenerator
 from .config import (
-    PHASE_1_DIR, OUTPUT_DIR, GROQ_API_KEY, QDRANT_COLLECTION, TOP_K,
+    PHASE_1_DIR, OUTPUT_DIR, OLLAMA_MODEL, QDRANT_COLLECTION, TOP_K,
 )
 from .state import IndexState, QueryState, TestState
 
@@ -193,7 +193,7 @@ def generation_node(state: QueryState) -> dict:
     chat_history = state.get("chat_history", [])
     logger.info("[Generation] Generating answer for: %s (history: %d msgs)", question[:60], len(chat_history))
     try:
-        generator = get_shared_generator(api_key=GROQ_API_KEY)
+        generator = get_shared_generator()
         answer = generator.generate(question, chunks, chat_history=chat_history)
         sources = generator._extract_sources(chunks)
         return {
@@ -233,7 +233,7 @@ def run_test_evaluation_node(state: TestState) -> dict:
 
     questions = state.get("questions", [])
     retriever = get_shared_retriever()
-    generator = get_shared_generator(api_key=GROQ_API_KEY)
+    generator = get_shared_generator()
 
     results: list[dict] = []
     for q in questions:
