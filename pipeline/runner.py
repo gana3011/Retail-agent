@@ -14,7 +14,7 @@ from .nodes import (
 )
 from .retriever import Retriever
 from .generator import AnswerGenerator
-from .config import GROQ_API_KEY
+from .config import OLLAMA_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +57,9 @@ def build_pipeline():
         kwargs["embedder"] = result["embedder"]
 
     retriever = get_shared_retriever(**kwargs)
-    generator = get_shared_generator(api_key=GROQ_API_KEY)
+    generator = get_shared_generator()
 
-    if not GROQ_API_KEY:
-        logger.warning("GROQ_API_KEY not set. Set it in .env file.")
-        logger.warning("Get a free key at: https://console.groq.com/keys")
+    logger.info("Using Ollama model: %s", OLLAMA_MODEL)
 
     return retriever, generator
 

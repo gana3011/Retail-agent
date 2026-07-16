@@ -1,33 +1,90 @@
+"""Embedding helpers — supports Ollama (nomic-embed-text) or Sentence Transformers."""
+
 import json
 import logging
 import time
 from pathlib import Path
 from typing import Optional
 
+import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams
-from sentence_transformers import SentenceTransformer
 
 from .ssl_setup import configure_ssl
 
 configure_ssl()
 
 from .config import (
-    PHASE_1_DIR, QDRANT_PATH, QDRANT_COLLECTION,
-    EMBEDDING_MODEL, EMBEDDING_DIM,
+    PHASE_1_DIR, QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION,
+    EMBEDDING_MODEL, EMBEDDING_DIM, OLLAMA_BASE_URL,
 )
 
 logger = logging.getLogger(__name__)
 
 
+# ──────────────────────────────────────────────────────────────
+# Ollama embedding helper
+# ──────────────────────────────────────────────────────────────
+
+class OllamaEmbedder:
+    """Wraps the Ollama /api/embed endpoint to produce dense vectors."""
+
+    def __init__(self, model: str = EMBEDDING_MODEL, base_url: str = OLLAMA_BASE_URL):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self._dim: Optional[int] = None
+
+    def encode(self, texts, show_progress_bar: bool = False, batch_size: int = 32):
+        """Encode a list of strings → numpy-compatible list of float arrays."""
+        import numpy as np
+
+        if isinstance(texts, str):
+            texts = [texts]
+
+        all_embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i: i + batch_size]
+            payload = {"model": self.model, "input": batch}
+            resp = requests.post(
+                f"{self.base_url}/api/embed",
+                json=payload,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embeddings = data.get("embeddings", [])
+            all_embeddings.extend(embeddings)
+
+        return np.array(all_embeddings, dtype="float32")
+
+    def get_sentence_embedding_dimension(self) -> int:
+        if self._dim is None:
+            sample = self.encode(["hello"])
+            self._dim = sample.shape[1]
+        return self._dim
+
+# ──────────────────────────────────────────────────────────────
+# Public factory: always returns OllamaEmbedder (fully local)
+# ──────────────────────────────────────────────────────────────
+
 def get_embedder(model_name: Optional[str] = None):
+    """Return an OllamaEmbedder — fully local, no HuggingFace required."""
     name = model_name or EMBEDDING_MODEL
-    logger.info("Loading embedding model: %s ...", name)
-    t0 = time.time()
-    model = SentenceTransformer(name, trust_remote_code=True)
-    logger.info("Model loaded in %.1fs", time.time() - t0)
-    return model
+    logger.info("Using Ollama embedder: %s @ %s", name, OLLAMA_BASE_URL)
+    embedder = OllamaEmbedder(model=name)
+    # Quick connectivity check
+    try:
+        embedder.encode(["test"])
+        logger.info("Ollama embedder ready (model=%s)", name)
+    except Exception as e:
+        logger.error(
+            "Cannot reach Ollama at %s. "
+            "Make sure Ollama is running and 'ollama pull %s' has been executed. Error: %s",
+            OLLAMA_BASE_URL, name, e,
+        )
+        raise
+    return embedder
 
 
 def load_chunks() -> list[dict]:
@@ -43,12 +100,16 @@ def load_chunks() -> list[dict]:
 
 
 def get_qdrant_client() -> QdrantClient:
-    QDRANT_PATH.mkdir(parents=True, exist_ok=True)
-    client = QdrantClient(path=str(QDRANT_PATH))
+    if QDRANT_API_KEY:
+        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    else:
+        client = QdrantClient(url=QDRANT_URL)
     return client
 
 
 def recreate_collection(client: QdrantClient):
+    dim = EMBEDDING_DIM
+
     try:
         client.delete_collection(QDRANT_COLLECTION)
     except Exception as e:
@@ -57,7 +118,7 @@ def recreate_collection(client: QdrantClient):
     client.create_collection(
         collection_name=QDRANT_COLLECTION,
         vectors_config=VectorParams(
-            size=EMBEDDING_DIM,
+            size=dim,
             distance=Distance.COSINE,
         ),
     )
@@ -69,14 +130,14 @@ def recreate_collection(client: QdrantClient):
             field_schema=models.PayloadSchemaType.KEYWORD,
         )
 
-    logger.info("Collection '%s' created with indexes", QDRANT_COLLECTION)
+    logger.info("Collection '%s' created with dim=%d and indexes", QDRANT_COLLECTION, dim)
 
 
 def embed_and_index(
     chunks: list[dict],
-    model: SentenceTransformer,
+    model,
     client: QdrantClient,
-    batch_size: int = 64,
+    batch_size: int = 32,
 ):
     texts = [c["text"] for c in chunks]
     metadatas = [c["metadata"] for c in chunks]
@@ -85,8 +146,8 @@ def embed_and_index(
     t0 = time.time()
 
     for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
-        batch_metas = metadatas[i:i + batch_size]
+        batch_texts = texts[i: i + batch_size]
+        batch_metas = metadatas[i: i + batch_size]
         embeddings = model.encode(batch_texts, show_progress_bar=False)
 
         points = []

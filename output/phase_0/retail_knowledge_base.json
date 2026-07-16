@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "generated_at": "2026-05-27",
+  "generated_at": "2026-07-07T14:24:26.956917",
   "total_elements": 1113,
   "elements": [
     {
@@ -1913,7 +1913,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Inventory Management - The Inventory Management Process Flow is about keeping track of products. It includes receiving goods, storing them safely, checking stock levels, and restocking when needed. Good inventory management prevents running out of items or having too much stock.",
       "slide": "Slide 4",
-      "term": "GRN (Goods Receipt Note)",
+      "term": "- GRN (Goods Receipt Note)",
       "definition": "A GRN is a document generated in the system confirming receipt of goods. It includes product names, quantities, date, and condition."
     },
     {
@@ -1922,7 +1922,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Inventory Management - The Inventory Management Process Flow is about keeping track of products. It includes receiving goods, storing them safely, checking stock levels, and restocking when needed. Good inventory management prevents running out of items or having too much stock.",
       "slide": "Slide 4",
-      "term": "Quarantine",
+      "term": "- Quarantine",
       "definition": "Physically isolating items that are defective or need inspection."
     },
     {
@@ -1964,7 +1964,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Inventory Management - The Inventory Management Process Flow is about keeping track of products. It includes receiving goods, storing them safely, checking stock levels, and restocking when needed. Good inventory management prevents running out of items or having too much stock.",
       "slide": "Slide 5",
-      "term": "Putaway",
+      "term": "- Putaway",
       "definition": "The process of storing incoming stock in appropriate warehouse locations."
     },
     {
@@ -2006,7 +2006,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Inventory Management - The Inventory Management Process Flow is about keeping track of products. It includes receiving goods, storing them safely, checking stock levels, and restocking when needed. Good inventory management prevents running out of items or having too much stock.",
       "slide": "Slide 6",
-      "term": "ATP (Available",
+      "term": "- ATP (Available",
       "definition": "to-Promise):\nThis shows how much inventory is available to sell across platforms -- factoring in existing commitments."
     },
     {
@@ -2073,7 +2073,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Inventory Management - The Inventory Management Process Flow is about keeping track of products. It includes receiving goods, storing them safely, checking stock levels, and restocking when needed. Good inventory management prevents running out of items or having too much stock.",
       "slide": "Slide 8",
-      "term": "Cycle Count",
+      "term": "- Cycle Count",
       "definition": "A method of regularly counting a subset of inventory to ensure accuracy."
     },
     {
@@ -2115,7 +2115,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Inventory Management - The Inventory Management Process Flow is about keeping track of products. It includes receiving goods, storing them safely, checking stock levels, and restocking when needed. Good inventory management prevents running out of items or having too much stock.",
       "slide": "Slide 9",
-      "term": "Reallocation",
+      "term": "- Reallocation",
       "definition": "Shifting available stock from one channel/location to another based on updated demand."
     },
     {
@@ -2878,7 +2878,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Sales and POS - The Sales and POS Process Flow is about completing a sale at checkout, in-store or online. It covers scanning items, applying offers, taking payment, issuing receipts, and updating inventory and sales records. A smooth POS makes checkout fast and accurate.\n Let's discuss how this process flow goes step by step.",
       "slide": "Slide 5",
-      "term": "Endless Aisle",
+      "term": "- Endless Aisle",
       "definition": "A retail strategy that allows customers to order out-of-stock items from another store or warehouse."
     },
     {
@@ -2904,7 +2904,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Sales and POS - The Sales and POS Process Flow is about completing a sale at checkout, in-store or online. It covers scanning items, applying offers, taking payment, issuing receipts, and updating inventory and sales records. A smooth POS makes checkout fast and accurate.\n Let's discuss how this process flow goes step by step.",
       "slide": "Slide 6",
-      "term": "ATP (Available to Promise)",
+      "term": "- ATP (Available to Promise)",
       "definition": "The amount of inventory that can be promised to a customer order in real-time."
     },
     {
@@ -2913,7 +2913,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Sales and POS - The Sales and POS Process Flow is about completing a sale at checkout, in-store or online. It covers scanning items, applying offers, taking payment, issuing receipts, and updating inventory and sales records. A smooth POS makes checkout fast and accurate.\n Let's discuss how this process flow goes step by step.",
       "slide": "Slide 6",
-      "term": "OOS (Out of Stock)",
+      "term": "- OOS (Out of Stock)",
       "definition": "Indicates the item is unavailable at all nodes."
     },
     {
@@ -3119,7 +3119,7 @@
       "element_type": "term_definition",
       "process_name": "Slide 1: Introduction to Sales and POS - The Sales and POS Process Flow is about completing a sale at checkout, in-store or online. It covers scanning items, applying offers, taking payment, issuing receipts, and updating inventory and sales records. A smooth POS makes checkout fast and accurate.\n Let's discuss how this process flow goes step by step.",
       "slide": "Slide 11",
-      "term": "DMS (Document Management System)",
+      "term": "- DMS (Document Management System)",
       "definition": "A system that stores digital records related to orders, inventory, and customer communications for compliance and traceability."
     },
     {

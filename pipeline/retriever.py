@@ -1,22 +1,53 @@
+"""Retriever — fully local via Ollama (no HuggingFace / no internet required).
+
+Embedding  : Ollama nomic-embed-text  (via /api/embed)
+LLM calls  : Ollama llama3.2 / qwen2.5  (via /api/chat)
+Reranking  : LLM-based relevance ranking  (single Ollama call, no CrossEncoder)
+"""
 import json
 import logging
 from typing import Optional
 
-from groq import Groq
+import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from sentence_transformers import SentenceTransformer
 
 from .ssl_setup import configure_ssl
 
 configure_ssl()
 
 from .config import (
-    QDRANT_PATH, QDRANT_COLLECTION, EMBEDDING_MODEL,
-    GROQ_API_KEY, GROQ_MODEL, TOP_K, RERANK_TOP_K, RERANKER_MODEL,
+    QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION,
+    EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL,
+    TOP_K, RERANK_TOP_K,
+    ENABLE_QUERY_EXPANSION, ENABLE_LLM_RERANK,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json(text: str):
+    """Extract the first valid JSON value from a string that may contain extra text.
+
+    Uses json.JSONDecoder.raw_decode() which stops at the end of the first
+    valid JSON token and ignores any trailing content (explanation sentences,
+    newlines, etc.) that small LLMs often append.
+    """
+    decoder = json.JSONDecoder()
+    text = text.strip()
+    # Scan forward until we find a '[' or '{' that starts a valid JSON value
+    for i, ch in enumerate(text):
+        if ch in ("[", "{"):
+            try:
+                value, _ = decoder.raw_decode(text, i)
+                return value
+            except json.JSONDecodeError:
+                continue
+    raise ValueError(f"No JSON found in: {text[:120]}")
+
+# ──────────────────────────────────────────────────────────────
+# Prompts
+# ──────────────────────────────────────────────────────────────
 
 QUERY_EXPANSION_PROMPT = """You are a retail knowledge base assistant. Given a user question, generate 2 alternative phrasings that would help retrieve relevant information from different document types (process flows, FAQs, glossary terms, training content, scenarios).
 
@@ -41,112 +72,137 @@ Latest question: {question}
 
 Rewritten standalone question:"""
 
+RERANK_PROMPT = """You are a relevance judge for a retail knowledge base.
+Given a question and a list of text chunks, return the indices of the {top_k} most relevant chunks, ordered from MOST to LEAST relevant.
+
+Question: {question}
+
+Chunks:
+{chunks_text}
+
+Rules:
+- Return ONLY a valid JSON array of integer indices (0-based), e.g. [2, 0, 4, 1, 3]
+- Include exactly {top_k} indices.
+- Do NOT include any explanation or extra text.
+
+JSON array of top {top_k} indices:"""
+
 
 class Retriever:
     def __init__(
         self,
         client: Optional[QdrantClient] = None,
-        embedder: Optional[SentenceTransformer] = None,
-        groq_client: Optional[Groq] = None,
-        model: Optional[str] = None,
-        reranker: Optional[object] = None,
+        embedder=None,
+        ollama_model: Optional[str] = None,
+        ollama_base_url: Optional[str] = None,
+        # legacy params kept for API compatibility
+        groq_client=None,
+        model=None,
+        reranker=None,
     ):
-        self.client = client or QdrantClient(path=str(QDRANT_PATH))
-        self.embedder = embedder or SentenceTransformer(
-            EMBEDDING_MODEL, trust_remote_code=True
-        )
-        self.llm_client = groq_client or (Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None)
-        self.llm_model = model or GROQ_MODEL
-        self.reranker = reranker
+        if client:
+            self.client = client
+        else:
+            if QDRANT_API_KEY:
+                self.client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+            else:
+                self.client = QdrantClient(url=QDRANT_URL)
 
-    def _load_reranker(self):
-        if self.reranker is not None:
-            return self.reranker
+        # Accept any embedder (OllamaEmbedder is the default)
+        if embedder is not None:
+            self.embedder = embedder
+        else:
+            from .indexing import OllamaEmbedder
+            self.embedder = OllamaEmbedder()
+
+        self.ollama_model = ollama_model or OLLAMA_MODEL
+        self.ollama_base_url = (ollama_base_url or OLLAMA_BASE_URL).rstrip("/")
+
+    # ──────────────────────────────────────────────────────────────
+    # Ollama chat helper
+    # ──────────────────────────────────────────────────────────────
+
+    def _chat(self, prompt: str, temperature: float = 0.3) -> str:
+        """Single non-streaming call to Ollama /api/chat."""
+        payload = {
+            "model": self.ollama_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": temperature},
+        }
         try:
-            from sentence_transformers import CrossEncoder
-            self.reranker = CrossEncoder(RERANKER_MODEL)
-            logger.info("Reranker model '%s' loaded", RERANKER_MODEL)
+            resp = requests.post(
+                f"{self.ollama_base_url}/api/chat",
+                json=payload,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return resp.json()["message"]["content"].strip()
         except Exception as e:
-            logger.warning("Failed to load reranker '%s': %s. Skipping reranking.", RERANKER_MODEL, e)
-            self.reranker = False
-        return self.reranker
+            logger.warning("Ollama /api/chat failed: %s", e)
+            return ""
 
-    def rewrite_with_context(
-        self, question: str, chat_history: list[dict]
-    ) -> str:
-        """Rewrite a follow-up question into a standalone query using chat history.
+    # ──────────────────────────────────────────────────────────────
+    # Contextual rewrite (follow-up questions)
+    # ──────────────────────────────────────────────────────────────
 
-        If no chat history is present or the LLM client is unavailable,
-        returns the question unchanged.
-        """
-        if not chat_history or not self.llm_client:
+    def rewrite_with_context(self, question: str, chat_history: list[dict]) -> str:
+        """Rewrite a follow-up question into a standalone query using chat history."""
+        if not chat_history:
             return question
 
-        # Build a compact history string (keep last 6 turns = 3 exchanges max)
         recent = chat_history[-6:]
         history_lines = []
         for msg in recent:
             role = msg.get("role", "user").capitalize()
             content = msg.get("content", "")
-            # Truncate long assistant answers to keep the prompt short
             if role == "Assistant" and len(content) > 300:
                 content = content[:300] + "..."
             history_lines.append(f"{role}: {content}")
         history_str = "\n".join(history_lines)
 
-        try:
-            response = self.llm_client.chat.completions.create(
-                model=self.llm_model,
-                messages=[{
-                    "role": "user",
-                    "content": CONTEXTUAL_REWRITE_PROMPT.format(
-                        history=history_str, question=question
-                    ),
-                }],
-                temperature=0.0,
-                max_tokens=150,
-            )
-            rewritten = response.choices[0].message.content.strip()
-            if rewritten:
-                logger.info(
-                    "[ContextRewrite] '%s' → '%s'", question[:60], rewritten[:60]
-                )
-                return rewritten
-        except Exception as e:
-            logger.warning("[ContextRewrite] Failed for '%s': %s", question, e)
-
+        prompt = CONTEXTUAL_REWRITE_PROMPT.format(history=history_str, question=question)
+        rewritten = self._chat(prompt, temperature=0.0)
+        if rewritten:
+            logger.info("[ContextRewrite] '%s' → '%s'", question[:60], rewritten[:60])
+            return rewritten
         return question
+
+    # ──────────────────────────────────────────────────────────────
+    # Multi-query expansion
+    # ──────────────────────────────────────────────────────────────
 
     def expand_queries(
         self, question: str, chat_history: list[dict] | None = None
     ) -> list[str]:
-        """Expand a question into multiple retrieval queries.
+        """Expand a question into 2-3 alternate retrieval queries.
 
-        When *chat_history* is provided the question is first rewritten
-        into a standalone form so that pronoun references are resolved.
+        Skipped when ENABLE_QUERY_EXPANSION=False (default) for speed —
+        the single nomic-embed-text query already gives good recall.
         """
-        # Step 1 — contextual rewrite (no-op when history is empty)
         standalone = self.rewrite_with_context(question, chat_history or [])
 
-        if not self.llm_client:
+        if not ENABLE_QUERY_EXPANSION:
+            logger.info("[MultiQuery] Expansion disabled — using single query")
             return [standalone]
+
+        prompt = QUERY_EXPANSION_PROMPT.format(question=standalone)
+        raw = self._chat(prompt, temperature=0.3)
+
         try:
-            response = self.llm_client.chat.completions.create(
-                model=self.llm_model,
-                messages=[{"role": "user", "content": QUERY_EXPANSION_PROMPT.format(question=standalone)}],
-                temperature=0.3,
-                max_tokens=200,
-            )
-            raw = response.choices[0].message.content.strip()
-            raw = raw.replace("```json", "").replace("```", "").strip()
-            expansions = json.loads(raw)
+            raw_clean = raw.replace("```json", "").replace("```", "").strip()
+            expansions = _extract_json(raw_clean)
             if isinstance(expansions, list) and len(expansions) > 0:
-                all_queries = [standalone] + [q for q in expansions if q.strip()]
+                all_queries = [standalone] + [q for q in expansions if isinstance(q, str) and q.strip()]
                 logger.info("[MultiQuery] %d queries for: %s", len(all_queries), standalone)
                 return all_queries[:4]
         except Exception as e:
             logger.warning("[MultiQuery] Expansion failed for '%s': %s", standalone, e)
         return [standalone]
+
+    # ──────────────────────────────────────────────────────────────
+    # Vector search
+    # ──────────────────────────────────────────────────────────────
 
     def _search(self, query_vector: list, k: int) -> list[dict]:
         result = self.client.query_points(
@@ -167,10 +223,11 @@ class Retriever:
         return results
 
     def _search_all(self, queries: list[str], k: int) -> list[dict]:
+        """Search Qdrant with all expanded queries, deduplicating results."""
         seen_texts = set()
         all_results = []
         for q in queries:
-            vec = self.embedder.encode(q).tolist()
+            vec = self.embedder.encode([q])[0].tolist()
             results = self._search(vec, k)
             for r in results:
                 text = r["text"][:200]
@@ -180,20 +237,64 @@ class Retriever:
         logger.info("[Search] %d queries -> %d unique candidates", len(queries), len(all_results))
         return all_results
 
+    # ──────────────────────────────────────────────────────────────
+    # LLM-based reranking (fully local — no HuggingFace CrossEncoder)
+    # ──────────────────────────────────────────────────────────────
+
     def _rerank(self, question: str, chunks: list[dict], top_k: int = RERANK_TOP_K) -> list[dict]:
-        reranker = self._load_reranker()
-        if not reranker:
-            return chunks[:top_k]
+        """Rerank chunks using Ollama LLM as relevance judge.
 
-        pairs = [(question, c["text"]) for c in chunks]
-        scores = reranker.predict(pairs)
-        for c, s in zip(chunks, scores):
-            c["rerank_score"] = float(s)
+        When ENABLE_LLM_RERANK=False (default) — uses vector similarity scores
+        directly (fast, ~0s). Enable for higher relevance precision at ~40s cost.
+        """
+        if not chunks:
+            return []
 
-        chunks.sort(key=lambda c: c.get("rerank_score", 0.0), reverse=True)
-        logger.info("[Rerank] top-1 score=%.4f, bottom-1 score=%.4f",
-                    chunks[0]["rerank_score"], chunks[-1]["rerank_score"])
-        return chunks[:top_k]
+        # Fast path: sort by Qdrant cosine similarity score — no LLM call needed
+        if not ENABLE_LLM_RERANK:
+            logger.info("[Rerank] Using vector score ordering (LLM rerank disabled)")
+            return sorted(chunks, key=lambda c: c.get("score", 0.0), reverse=True)[:top_k]
+
+        if len(chunks) <= top_k:
+            return chunks
+
+        # Build numbered chunk list (truncate each to 300 chars for prompt efficiency)
+        chunks_text = "\n\n".join(
+            f"[{i}]: {c['text'][:300].strip()}..."
+            for i, c in enumerate(chunks)
+        )
+
+        prompt = RERANK_PROMPT.format(
+            question=question,
+            chunks_text=chunks_text,
+            top_k=top_k,
+        )
+
+        raw = self._chat(prompt, temperature=0.0)
+
+        try:
+            indices = _extract_json(raw)
+            if isinstance(indices, list):
+                # Validate: must be valid integer indices within range
+                valid = [
+                    int(i) for i in indices
+                    if isinstance(i, (int, float)) and 0 <= int(i) < len(chunks)
+                ]
+                if valid:
+                    seen: set = set()
+                    ordered = [chunks[i] for i in valid if not (i in seen or seen.add(i))]
+                    logger.info("[LLM-Rerank] Selected indices %s from %d candidates", valid[:top_k], len(chunks))
+                    return ordered[:top_k]
+        except Exception as e:
+            logger.warning("[LLM-Rerank] Parsing failed: %s | raw: %s", e, raw[:200])
+
+        # Fallback: sort by vector score and take top_k
+        logger.info("[LLM-Rerank] Fallback to vector score ordering")
+        return sorted(chunks, key=lambda c: c.get("score", 0.0), reverse=True)[:top_k]
+
+    # ──────────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────────
 
     def retrieve(self, question: str, k: int = TOP_K) -> list[dict]:
         queries = self.expand_queries(question)
@@ -204,7 +305,7 @@ class Retriever:
         self, question: str, override_filters: dict, k: int = TOP_K
     ) -> list[dict]:
         queries = self.expand_queries(question)
-        query_vectors = [self.embedder.encode(q).tolist() for q in queries]
+        query_vectors = [self.embedder.encode([q])[0].tolist() for q in queries]
 
         filter_conditions = []
         for key, value in override_filters.items():
