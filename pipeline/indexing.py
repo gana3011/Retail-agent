@@ -16,7 +16,7 @@ from .ssl_setup import configure_ssl
 configure_ssl()
 
 from .config import (
-    PHASE_1_DIR, QDRANT_PATH, QDRANT_COLLECTION,
+    PHASE_1_DIR, QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION,
     EMBEDDING_MODEL, EMBEDDING_DIM, OLLAMA_BASE_URL,
 )
 
@@ -100,14 +100,15 @@ def load_chunks() -> list[dict]:
 
 
 def get_qdrant_client() -> QdrantClient:
-    QDRANT_PATH.mkdir(parents=True, exist_ok=True)
-    client = QdrantClient(path=str(QDRANT_PATH))
+    if QDRANT_API_KEY:
+        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    else:
+        client = QdrantClient(url=QDRANT_URL)
     return client
 
 
 def recreate_collection(client: QdrantClient):
-    # Use the correct dimension for whatever embedder is active
-    dim = EMBEDDING_DIM if USE_OLLAMA_EMBEDDINGS else ST_EMBEDDING_DIM
+    dim = EMBEDDING_DIM
 
     try:
         client.delete_collection(QDRANT_COLLECTION)

@@ -17,7 +17,7 @@ from .ssl_setup import configure_ssl
 configure_ssl()
 
 from .config import (
-    QDRANT_PATH, QDRANT_COLLECTION,
+    QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION,
     EMBEDDING_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL,
     TOP_K, RERANK_TOP_K,
     ENABLE_QUERY_EXPANSION, ENABLE_LLM_RERANK,
@@ -100,7 +100,13 @@ class Retriever:
         model=None,
         reranker=None,
     ):
-        self.client = client or QdrantClient(path=str(QDRANT_PATH))
+        if client:
+            self.client = client
+        else:
+            if QDRANT_API_KEY:
+                self.client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+            else:
+                self.client = QdrantClient(url=QDRANT_URL)
 
         # Accept any embedder (OllamaEmbedder is the default)
         if embedder is not None:

@@ -18,7 +18,8 @@ OUTPUT_DIR = BASE_DIR / "output"
 PHASE_0_DIR = OUTPUT_DIR / "phase_0"
 PHASE_0_JSON = PHASE_0_DIR / "retail_knowledge_base.json"
 PHASE_1_DIR = OUTPUT_DIR / "phase_1"
-QDRANT_PATH = OUTPUT_DIR / "qdrant_storage"
+QDRANT_URL = os.environ.get("QDRANT_URL", "https://cd18c5ab-228a-4070-b018-05602213c45c.us-east-2-0.aws.cloud.qdrant.io")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
 
 # ── Embedding: Ollama nomic-embed-text (768-dim, fully local) ─────────────────
 EMBEDDING_MODEL = "nomic-embed-text"   # ollama pull nomic-embed-text

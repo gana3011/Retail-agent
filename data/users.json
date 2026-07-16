@@ -1,0 +1,10 @@
+{
+  "admin": {
+    "password_hash": "$2b$12$jQgbSN/nyX/.N.hPxoNSnOikVOvI25pO2A3kJPC2cXov1ohHx5w8q",
+    "role": "admin"
+  },
+  "ganapathi": {
+    "password_hash": "$2b$12$0cFZOzbCwD2bEZHdfHS4guV2lBxE5OkNBfi0kWH2Tp3ElREZxVobe",
+    "role": "user"
+  }
+}
