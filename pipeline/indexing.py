@@ -10,6 +10,7 @@ import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams
+from fastembed import SparseTextEmbedding
 
 from .ssl_setup import configure_ssl
 
@@ -100,27 +101,26 @@ def load_chunks() -> list[dict]:
 
 
 def get_qdrant_client() -> QdrantClient:
+    port = 443 if QDRANT_URL.startswith("https") else 6333
     if QDRANT_API_KEY:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        client = QdrantClient(url=QDRANT_URL, port=port, api_key=QDRANT_API_KEY)
     else:
-        client = QdrantClient(url=QDRANT_URL)
+        client = QdrantClient(url=QDRANT_URL, port=port)
     return client
 
 
 def recreate_collection(client: QdrantClient):
     dim = EMBEDDING_DIM
 
-    try:
-        client.delete_collection(QDRANT_COLLECTION)
-    except Exception as e:
-        logger.warning("Could not delete existing collection: %s", e)
-
-    client.create_collection(
+    client.recreate_collection(
         collection_name=QDRANT_COLLECTION,
-        vectors_config=VectorParams(
+        vectors_config=models.VectorParams(
             size=dim,
-            distance=Distance.COSINE,
+            distance=models.Distance.COSINE,
         ),
+        sparse_vectors_config={
+            "sparse": models.SparseVectorParams()
+        }
     )
 
     for field in ("doc_type", "element_type", "domain", "source_doc"):
@@ -145,17 +145,27 @@ def embed_and_index(
     logger.info("Generating embeddings for %d chunks...", len(texts))
     t0 = time.time()
 
+    sparse_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
+
     for i in range(0, len(texts), batch_size):
         batch_texts = texts[i: i + batch_size]
         batch_metas = metadatas[i: i + batch_size]
+        
         embeddings = model.encode(batch_texts, show_progress_bar=False)
+        sparse_embeddings = list(sparse_model.embed(batch_texts))
 
         points = []
-        for j, (emb, meta) in enumerate(zip(embeddings, batch_metas)):
+        for j, (emb, sparse_emb, meta) in enumerate(zip(embeddings, sparse_embeddings, batch_metas)):
             points.append(
                 models.PointStruct(
                     id=i + j,
-                    vector=emb.tolist(),
+                    vector={
+                        "": emb.tolist(),
+                        "sparse": models.SparseVector(
+                            indices=sparse_emb.indices.tolist(),
+                            values=sparse_emb.values.tolist(),
+                        )
+                    },
                     payload={
                         "text": batch_texts[j],
                         **meta,

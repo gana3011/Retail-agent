@@ -11,6 +11,7 @@ from typing import Optional
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
+from fastembed import SparseTextEmbedding
 
 from .ssl_setup import configure_ssl
 
@@ -117,6 +118,8 @@ class Retriever:
 
         self.ollama_model = ollama_model or OLLAMA_MODEL
         self.ollama_base_url = (ollama_base_url or OLLAMA_BASE_URL).rstrip("/")
+        
+        self.sparse_embedder = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
 
     # ──────────────────────────────────────────────────────────────
     # Ollama chat helper
@@ -204,10 +207,27 @@ class Retriever:
     # Vector search
     # ──────────────────────────────────────────────────────────────
 
-    def _search(self, query_vector: list, k: int) -> list[dict]:
+    def _search(self, query_text: str, k: int) -> list[dict]:
+        dense_vec = self.embedder.encode([query_text])[0].tolist()
+        sparse_gen = list(self.sparse_embedder.embed([query_text]))[0]
+        
         result = self.client.query_points(
             collection_name=QDRANT_COLLECTION,
-            query=query_vector,
+            prefetch=[
+                models.Prefetch(
+                    query=dense_vec,
+                    limit=k * 2
+                ),
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=sparse_gen.indices.tolist(),
+                        values=sparse_gen.values.tolist(),
+                    ),
+                    using="sparse",
+                    limit=k * 2
+                )
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=k,
             with_payload=True,
         )
@@ -223,12 +243,11 @@ class Retriever:
         return results
 
     def _search_all(self, queries: list[str], k: int) -> list[dict]:
-        """Search Qdrant with all expanded queries, deduplicating results."""
+        """Search Qdrant with all expanded queries (Hybrid), deduplicating results."""
         seen_texts = set()
         all_results = []
         for q in queries:
-            vec = self.embedder.encode([q])[0].tolist()
-            results = self._search(vec, k)
+            results = self._search(q, k)
             for r in results:
                 text = r["text"][:200]
                 if text not in seen_texts:
@@ -305,7 +324,6 @@ class Retriever:
         self, question: str, override_filters: dict, k: int = TOP_K
     ) -> list[dict]:
         queries = self.expand_queries(question)
-        query_vectors = [self.embedder.encode([q])[0].tolist() for q in queries]
 
         filter_conditions = []
         for key, value in override_filters.items():
@@ -323,11 +341,29 @@ class Retriever:
 
         seen_texts = set()
         all_results = []
-        for vec in query_vectors:
+        for q in queries:
+            dense_vec = self.embedder.encode([q])[0].tolist()
+            sparse_gen = list(self.sparse_embedder.embed([q]))[0]
+
             result = self.client.query_points(
                 collection_name=QDRANT_COLLECTION,
-                query=vec,
-                query_filter=query_filter,
+                prefetch=[
+                    models.Prefetch(
+                        query=dense_vec,
+                        limit=k * 2,
+                        filter=query_filter
+                    ),
+                    models.Prefetch(
+                        query=models.SparseVector(
+                            indices=sparse_gen.indices.tolist(),
+                            values=sparse_gen.values.tolist(),
+                        ),
+                        using="sparse",
+                        limit=k * 2,
+                        filter=query_filter
+                    )
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
                 limit=k * 2,
                 with_payload=True,
             )
